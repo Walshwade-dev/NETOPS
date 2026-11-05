@@ -22,6 +22,8 @@ frontend/dist/
 
 # Backups & Scratch files
 *.backup
+*.backup-*
+*.safe-backup
 *.bak
 *.save
 *.before-*
@@ -31,3 +33,7 @@ frontend/dist/
 *.xlsx
 *.pdf
 *.log
+*.db
+.demo-pids
+
+

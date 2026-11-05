@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Ready-4169E1?style=flat-square&logo=postgresql&logoColor=white)](https://www.postgresql.org)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=flat-square&logo=docker&logoColor=white)](https://www.docker.com)
-[![Tests](https://img.shields.io/badge/Tests-109%20Passing-brightgreen?style=flat-square)]()
+[![Tests](https://img.shields.io/badge/Tests-123%20Passing-brightgreen?style=flat-square)]()
 
 **NETOPS** is an enterprise-grade Network and Endpoint Operations management platform designed to automate network discovery, enforce device access policies, monitor endpoint patch and security health, and provide real-time auditing and compliance reporting.
 
@@ -108,7 +108,7 @@ NETOPS/
 │   │   ├── config.py              # Environment configuration (pydantic-settings)
 │   │   ├── database.py            # Database session and engine setup
 │   │   └── main.py                # FastAPI app entry point & WebSocket handlers
-│   ├── tests/                     # Test suite (111 comprehensive unit/integration tests)
+│   ├── tests/                     # Test suite (123 comprehensive unit/integration tests)
 │   ├── requirements.txt           # Python dependencies
 │   └── .env.example               # Template for backend environment variables
 ├── frontend/                      # React 19 web management console
@@ -119,6 +119,7 @@ NETOPS/
 │   └── vite.config.js             # Vite bundler configuration
 ├── Dockerfile.backend             # Production Docker container for FastAPI backend
 ├── Dockerfile.frontend            # Production Docker container for React/Nginx frontend
+├── netops.sh                      # 1-Command Simulation Demo & Service Manager
 └── README.md                      # Project documentation
 ```
 
@@ -131,6 +132,16 @@ NETOPS/
 * **Node.js 18+** & npm
 * **PostgreSQL** (or SQLite for local evaluation)
 * **Docker & Docker Compose** (optional, for containerized deployment)
+
+### 🚀 1-Command Live Simulation Demo (Zero Hardware Required)
+Launch the FastAPI backend, React 19 dashboard, and automatically seed fictional test endpoints (`SIM-PC-01` on VLAN 20, `SIM-CCTV-01` on VLAN 30, `SIM-PRINTER-01` on VLAN 40, and `SIM-UNKNOWN-01` quarantined on VLAN 90) with a single command:
+
+```bash
+./netops.sh demo
+```
+* **Web Dashboard:** [http://localhost:5173](http://localhost:5173)
+* **Interactive Swagger API:** [http://localhost:8000/docs](http://localhost:8000/docs)
+* **Stop Demo:** `./netops.sh demo-stop`
 
 ---
 
@@ -195,7 +206,7 @@ docker run -d --name netops-frontend -p 80:80 netops-frontend
 
 ## 🧪 Running the Automated Test Suite
 
-NETOPS includes a comprehensive suite of 111 automated tests covering discovery logic, agentless LAN patch scanning, centralized patch remediation & scheduled maintenance windows, Cisco/Sophos parsers, access schedule evaluation, report generators, and REST endpoints:
+NETOPS includes a comprehensive suite of 123 automated tests covering discovery logic, agentless LAN patch scanning, centralized patch remediation & scheduled maintenance windows, Cisco/Sophos parsers, access schedule evaluation, report generators, and REST endpoints:
 
 ```bash
 # Activate virtual environment
