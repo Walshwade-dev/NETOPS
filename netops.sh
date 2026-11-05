@@ -27,12 +27,15 @@ case "$ACTION" in
         # 1. Start FastAPI Backend on port 8000
         echo "  [1/3] Starting FastAPI Backend on http://localhost:8000 ..."
         PYTHONPATH="$PROJECT_DIR" nohup "$PROJECT_DIR/.venv/bin/uvicorn" backend.app.main:app \
-            --host 0.0.0.0 --port 8000 > "$BACKEND_LOG" 2>&1 &
+            --host 0.0.0.0 --port 8000 < /dev/null > "$BACKEND_LOG" 2>&1 &
         BACKEND_PID=$!
 
         # 2. Start React 19 + Vite Frontend on port 5173
         echo "  [2/3] Starting React 19 Vite Console on http://localhost:5173 ..."
-        (cd "$PROJECT_DIR/frontend" && nohup npm run dev -- --host 0.0.0.0 --port 5173 > "$FRONTEND_LOG" 2>&1 &)
+        (
+            cd "$PROJECT_DIR/frontend"
+            nohup npm run dev -- --host 0.0.0.0 --port 5173 < /dev/null > "$FRONTEND_LOG" 2>&1 &
+        ) < /dev/null > /dev/null 2>&1
         sleep 0.3
         FRONTEND_PID=$(pgrep -f "vite.*5173" | head -n 1 || echo "")
 

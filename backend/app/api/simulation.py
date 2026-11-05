@@ -146,3 +146,33 @@ def seed_simulation_devices(db: Session = Depends(get_db)):
         ],
         "already_present": already_present,
     }
+
+
+@router.post("/clear")
+def clear_simulation_devices(db: Session = Depends(get_db)):
+    """
+    Remove fictional RFC 5737 simulation devices so the operator can view
+    strictly real physical LAN telemetry without simulation noise.
+    """
+    sim_macs = {sample["mac_address"] for sample in SAMPLE_DEVICES}
+    devices = db.scalars(select(Device)).all()
+    removed_hostnames: list[str] = []
+
+    for device in devices:
+        is_sim = (
+            device.mac_address in sim_macs
+            or (device.notes and "NETOPS SIMULATION:" in device.notes)
+            or (device.ip_address and device.ip_address.startswith("192.0.2."))
+        )
+        if is_sim:
+            removed_hostnames.append(f"{device.hostname or device.mac_address} ({device.ip_address})")
+            db.delete(device)
+
+    db.commit()
+
+    return {
+        "mode": "live_lan_only",
+        "removed_count": len(removed_hostnames),
+        "removed_devices": removed_hostnames,
+    }
+

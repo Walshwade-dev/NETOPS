@@ -26,6 +26,7 @@ from .services.websocket_manager import manager
 from .services.schedule_enforcement import schedule_enforcement_loop
 from .services.endpoint_health_monitor import endpoint_health_monitor_loop
 from .services.patch_remediation_service import dispatch_due_scheduled_jobs
+from .services.lan_ids import start_canary_trap
 
 
 # ---------------------------------------------------------
@@ -57,6 +58,7 @@ app.add_middleware(
         for origin in settings.cors_origins.split(",")
         if origin.strip()
     ],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -190,6 +192,10 @@ async def startup_event_broadcaster():
 
     asyncio.create_task(
         scheduled_patch_loop()
+    )
+
+    asyncio.create_task(
+        start_canary_trap()
     )
 
 

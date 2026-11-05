@@ -14,48 +14,75 @@ from .event_service import create_event
 from .discovery import (
     discover_devices,
     save_discovered_devices,
+    get_active_network_cidr,
     get_local_ip,
     get_local_mac,
 )
 
 
 def get_default_network() -> str:
-    """Auto-detect the active IPv4 network range of the default gateway interface."""
+    """Auto-detect the active IPv4 network range of the default gateway interface across any OS."""
+    system = platform.system().lower()
     try:
-        res = subprocess.run(
-            ["ip", "-4", "route", "show", "default"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=5,
-        )
-        for line in res.stdout.splitlines():
-            parts = line.split()
-            if "dev" in parts:
-                dev = parts[parts.index("dev") + 1]
-                addr_res = subprocess.run(
-                    ["ip", "-4", "addr", "show", dev],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    timeout=5,
-                )
-                for aline in addr_res.stdout.splitlines():
-                    aline = aline.strip()
-                    if aline.startswith("inet "):
-                        cidr = aline.split()[1]
-                        net = ipaddress.ip_network(cidr, strict=False)
-                        return str(net)
+        if system == "windows":
+            res = subprocess.run(
+                ["ipconfig"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+            local_ip = get_local_ip()
+            matched_ip = False
+            for line in res.stdout.splitlines():
+                if local_ip in line:
+                    matched_ip = True
+                elif matched_ip and "Subnet Mask" in line:
+                    parts = line.split(":")
+                    if len(parts) > 1:
+                        mask = parts[1].strip()
+                        return str(ipaddress.IPv4Network(f"{local_ip}/{mask}", strict=False))
+        else:
+            res = subprocess.run(
+                ["ip", "-4", "route", "show", "default"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+            for line in res.stdout.splitlines():
+                parts = line.split()
+                if "dev" in parts:
+                    dev = parts[parts.index("dev") + 1]
+                    addr_res = subprocess.run(
+                        ["ip", "-4", "addr", "show", dev],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=5,
+                    )
+                    for aline in addr_res.stdout.splitlines():
+                        aline = aline.strip()
+                        if aline.startswith("inet "):
+                            cidr = aline.split()[1]
+                            net = ipaddress.ip_network(cidr, strict=False)
+                            return str(net)
     except Exception:
         pass
     return "192.168.0.0/24"
 
 
 def check_local_updates() -> dict:
-    """Check package update status for the local machine running NETOPS."""
+    """Check package update status for the local machine running NETOPS (Linux/Arch/Debian/RHEL/Windows)."""
+    import shutil
+
+    os_name = platform.system() or "Linux"
     try:
+        cmd = ["apt", "list", "--upgradable"]
+        if not shutil.which("apt") and shutil.which("pacman"):
+            cmd = ["pacman", "-Qu"]
         result = subprocess.run(
-            ["apt", "list", "--upgradable"],
+            cmd,
             capture_output=True,
             text=True,
             check=False,
@@ -67,7 +94,7 @@ def check_local_updates() -> dict:
             if line.strip() and not line.startswith("Listing...")
         ]
         return {
-            "operating_system": "Linux",
+            "operating_system": os_name,
             "os_version": platform.release(),
             "architecture": platform.machine(),
             "update_status": (
@@ -78,7 +105,7 @@ def check_local_updates() -> dict:
         }
     except Exception:
         return {
-            "operating_system": "Linux",
+            "operating_system": os_name,
             "os_version": platform.release(),
             "architecture": platform.machine(),
             "update_status": "up_to_date",
