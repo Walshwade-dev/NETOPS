@@ -7,6 +7,7 @@ import socket
 import subprocess
 import uuid
 import xml.etree.ElementTree as ET
+from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import select
@@ -330,6 +331,9 @@ def get_neighbor_devices() -> list[dict]:
                     parts = line.split()
                     if not parts or "lladdr" not in parts:
                         continue
+                    state = parts[-1].upper()
+                    if state in ("FAILED", "INCOMPLETE"):
+                        continue
                     ip_address = parts[0]
                     if not is_valid_ip_address(ip_address):
                         continue
@@ -339,6 +343,22 @@ def get_neighbor_devices() -> list[dict]:
                     mac_address = normalize_mac(parts[lladdr_index + 1])
                     if not mac_address:
                         continue
+
+                    # If kernel neighbor entry is STALE, verify reachability with a fast 1-second ping
+                    # so disconnected Wi-Fi phones aren't falsely kept "online" by stale ARP cache.
+                    if state == "STALE" and shutil.which("ping"):
+                        try:
+                            ping_chk = subprocess.run(
+                                ["ping", "-c", "1", "-W", "1", ip_address],
+                                capture_output=True,
+                                text=True,
+                                check=False,
+                                timeout=2,
+                            )
+                            if ping_chk.returncode != 0:
+                                continue
+                        except Exception:
+                            continue
 
                     devices_by_mac[mac_address] = {
                         "ip_address": ip_address,
@@ -675,7 +695,21 @@ def save_discovered_devices(
             existing_device.status == "online"
             and existing_device.mac_address.upper() not in discovered_macs
         ):
+            # Do not mark active Virtual Lab (127.0.2.x) appliances offline during a physical LAN scan
+            if existing_device.ip_address and existing_device.ip_address.startswith("127.0.2."):
+                continue
             existing_device.status = "offline"
+            create_event(
+                db,
+                "device_disconnected",
+                (
+                    f"Device disconnected from LAN: "
+                    f"{existing_device.hostname or 'Unknown Device'} "
+                    f"({existing_device.ip_address or 'No IP'}) "
+                    f"[{existing_device.mac_address}] — moved to Connection History."
+                ),
+                existing_device.id,
+            )
 
     for discovered in devices:
         mac_address = discovered.get("mac_address")
@@ -791,17 +825,44 @@ def save_discovered_devices(
                 ):
                     existing_device.classification_status = "normal"
 
+            was_offline = existing_device.status != "online"
             existing_device.status = "online"
+            existing_device.last_seen = datetime.utcnow()
+            if was_offline:
+                create_event(
+                    db,
+                    "device_reconnected",
+                    (
+                        f"Device reconnected to LAN: "
+                        f"{existing_device.hostname or 'Unknown Device'} "
+                        f"({existing_device.ip_address or 'No IP'}) "
+                        f"[{existing_device.mac_address}]."
+                    ),
+                    existing_device.id,
+                )
+            iface_name = get_active_interface() or "wlp1s0"
+            gw_addr = get_default_gateway_ip() or "LAN-GW"
+            if not existing_device.switch_name:
+                existing_device.switch_name = f"GW-{gw_addr}"
+            if not existing_device.switch_port:
+                existing_device.switch_port = (
+                    f"{iface_name} (Gateway Uplink)"
+                    if existing_device.ip_address == gw_addr
+                    else f"{iface_name} (802.11 WLAN)"
+                )
             saved_devices.append(existing_device)
 
         else:
             device_type = (
                 None if detected_type == "unknown" else detected_type
             )
+            iface_name = get_active_interface() or "wlp1s0"
+            gw_addr = get_default_gateway_ip() or "LAN-GW"
+            ip_val = discovered.get("ip_address")
 
             new_device = Device(
                 mac_address=mac_address,
-                ip_address=discovered.get("ip_address"),
+                ip_address=ip_val,
                 hostname=hostname,
                 vendor=vendor,
                 notes=notes,
@@ -810,6 +871,12 @@ def save_discovered_devices(
                 status="online",
                 approval_status="pending",
                 vlan_id=get_vlan_for_device_type(detected_type),
+                switch_name=f"GW-{gw_addr}",
+                switch_port=(
+                    f"{iface_name} (Gateway Uplink)"
+                    if ip_val == gw_addr
+                    else f"{iface_name} (802.11 WLAN)"
+                ),
             )
 
             db.add(new_device)

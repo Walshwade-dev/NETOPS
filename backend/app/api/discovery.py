@@ -17,7 +17,13 @@ from ..services.lan_ids import (
     run_lan_security_audit,
     simulate_lan_attack,
 )
-from ..services.lan_intelligence import get_default_gateway_ip
+from ..services.lan_intelligence import (
+    execute_sysadmin_command,
+    get_default_gateway_ip,
+    inspect_host_exhaustive,
+)
+from ..models.device import Device
+from sqlalchemy import select
 
 
 router = APIRouter(
@@ -39,6 +45,10 @@ class DiscoveryRequest(BaseModel):
 
 class AttackDrillRequest(BaseModel):
     attack_type: str = "arp_spoof"
+
+
+class ConsoleCommandRequest(BaseModel):
+    command: str = "help"
 
 
 @router.get("/network")
@@ -98,6 +108,75 @@ def run_simulate_attack_endpoint(
     to verify real-time IDS alerting.
     """
     return simulate_lan_attack(db, attack_type=request.attack_type)
+
+
+@router.post("/console")
+def run_console_command_endpoint(
+    request: ConsoleCommandRequest,
+):
+    """
+    Execute a live sysadmin diagnostic command (`arp`, `route`, `ports`, `ping`,
+    `inspect`, `help`) and return terminal lines for the UI console.
+    """
+    return execute_sysadmin_command(request.command)
+
+
+@router.post("/inspect/{device_id}")
+def inspect_device_endpoint(
+    device_id: int,
+    db: Session = Depends(get_db),
+):
+    """
+    Perform an exhaustive live L2/L3/L4/L7 inspection of a tracked device
+    (26-port TCP scan, banner grabbing, ICMP RTT/TTL OS fingerprinting,
+    kernel ARP state, and IEEE 802 MAC bit breakdown).
+    """
+    device = db.scalar(select(Device).where(Device.id == device_id))
+    if device is None:
+        raise HTTPException(status_code=404, detail="Device not found.")
+
+    if not device.ip_address:
+        raise HTTPException(status_code=400, detail="Device has no IPv4 address to inspect.")
+
+    report = inspect_host_exhaustive(
+        ip_address=device.ip_address,
+        mac_address=device.mac_address,
+        hostname=device.hostname,
+    )
+
+    # Enrich device record if new vendor or service summary was discovered
+    if not device.vendor and report["mac_analysis"].get("vendor"):
+        device.vendor = report["mac_analysis"]["vendor"]
+
+    iface = get_active_interface() or "wlp1s0"
+    gw_ip = get_default_gateway_ip() or "192.168.8.1"
+    if not device.switch_name:
+        device.switch_name = f"GW-{gw_ip}"
+    if not device.switch_port:
+        device.switch_port = (
+            f"{iface} (Gateway Uplink)"
+            if device.ip_address == gw_ip
+            else f"{iface} (802.11 WLAN)"
+        )
+
+    db.commit()
+    db.refresh(device)
+
+    report["device"] = {
+        "id": device.id,
+        "hostname": device.hostname,
+        "ip_address": device.ip_address,
+        "mac_address": device.mac_address,
+        "vendor": device.vendor,
+        "device_type": device.device_type or "unknown",
+        "vlan_id": device.vlan_id,
+        "approval_status": device.approval_status,
+        "enforcement_status": device.enforcement_status,
+        "switch_name": device.switch_name,
+        "switch_port": device.switch_port,
+        "notes": device.notes,
+    }
+    return report
 
 
 @router.post("/scan")

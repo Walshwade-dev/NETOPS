@@ -100,6 +100,5 @@ class Device(Base):
     last_seen: Mapped[datetime] = mapped_column(
         DateTime,
         default=datetime.utcnow,
-        onupdate=datetime.utcnow,
         nullable=False,
     )

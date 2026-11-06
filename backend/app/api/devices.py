@@ -826,3 +826,39 @@ def set_device_vlan(
 
     return device
 
+
+# ------------------------------------------------------------
+# DELETE / PURGE HISTORICAL DEVICE
+# ------------------------------------------------------------
+
+@router.delete(
+    "/{device_id}",
+)
+def delete_device(
+    device_id: int,
+    db: Session = Depends(get_db),
+):
+    device = db.get(Device, device_id)
+
+    if device is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Device not found",
+        )
+
+    hostname = device.hostname or "Unknown Device"
+    ip_addr = device.ip_address or "No IP"
+    mac_addr = device.mac_address
+
+    db.delete(device)
+    db.commit()
+
+    return {
+        "status": "deleted",
+        "device_id": device_id,
+        "hostname": hostname,
+        "ip_address": ip_addr,
+        "mac_address": mac_addr,
+    }
+
+

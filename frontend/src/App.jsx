@@ -134,6 +134,13 @@ function Icon({ name, size = 16 }) {
           <path d="M6 14h12" />
         </svg>
       );
+    case "search":
+      return (
+        <svg {...props}>
+          <circle cx="11" cy="11" r="8" />
+          <line x1="21" y1="21" x2="16.65" y2="16.65" />
+        </svg>
+      );
     case "alert":
     default:
       return (
@@ -180,6 +187,7 @@ function App() {
     enabled: true,
   });
   const [deviceFilter, setDeviceFilter] = useState("all");
+  const [historyFilter, setHistoryFilter] = useState("disconnected");
   const [vlanFilter, setVlanFilter] = useState("all");
   const [eventTypeFilter, setEventTypeFilter] = useState("all");
   const [eventLimit, setEventLimit] = useState(50);
@@ -224,10 +232,14 @@ function App() {
   const [securityAuditBanner, setSecurityAuditBanner] = useState(null);
   const [intrusionAlert, setIntrusionAlert] = useState(null);
   const [terminalOpen, setTerminalOpen] = useState(true);
+  const [consoleInput, setConsoleInput] = useState("");
+  const [consoleRunning, setConsoleRunning] = useState(false);
+  const [inspectingDeviceId, setInspectingDeviceId] = useState(null);
+  const [inspectedHostData, setInspectedHostData] = useState(null);
   const [terminalLines, setTerminalLines] = useState([
     {
       ts: new Date().toLocaleTimeString(),
-      text: "NETOPS Sysadmin Telemetry Console initialized. Listening on WebSocket /ws/events & TCP Canary Trap :8899...",
+      text: "NETOPS Sysadmin Telemetry Console initialized. Click any command chip below or type a command (try 'help', 'arp', 'route', 'ping gw', 'inspect gw').",
       tone: "info",
     },
   ]);
@@ -241,17 +253,79 @@ function App() {
     ]);
   };
 
-  const totalDevices = devices.length;
-  const onlineDevices = devices.filter((device) => device.status === "online").length;
-  const pendingDevices = devices.filter((device) => device.approval_status === "pending").length;
-  const rejectedDevices = devices.filter((device) => device.approval_status === "rejected").length;
-  const quarantinedDevices = devices.filter(
+  // Live views only maintain devices currently online (status === "online")
+  // Disconnected / historical devices are shown in the dedicated Connection History page
+  const liveDevices = devices.filter((device) => device.status === "online");
+  const historicalDevices = devices.filter((device) => device.status !== "online");
+  const totalDevices = liveDevices.length;
+  const onlineDevices = liveDevices.length;
+  const pendingDevices = liveDevices.filter((device) => device.approval_status === "pending").length;
+  const rejectedDevices = liveDevices.filter((device) => device.approval_status === "rejected").length;
+  const quarantinedDevices = liveDevices.filter(
     (device) =>
       device.enforcement_status === "quarantined" || device.access_decision === "quarantine"
   ).length;
-  const simulationDevicesCount = devices.filter(
-    (device) => device.ip_address && device.ip_address.startsWith("192.0.2.")
+  const simulationDevicesCount = liveDevices.filter(
+    (device) =>
+      device.ip_address &&
+      (device.ip_address.startsWith("192.0.2.") ||
+        device.ip_address.startsWith("127.0.2."))
   ).length;
+
+  const parseUtcDate = (isoStr) => {
+    if (!isoStr) return null;
+    const normalized =
+      isoStr.endsWith("Z") || isoStr.includes("+") ? isoStr : `${isoStr}Z`;
+    const dt = new Date(normalized);
+    return Number.isNaN(dt.getTime()) ? null : dt;
+  };
+
+  const formatTimestamp = (isoStr) => {
+    const dt = parseUtcDate(isoStr);
+    if (!dt) return "—";
+    return dt.toLocaleString([], {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  };
+
+  const formatRelativeTime = (isoStr) => {
+    const dt = parseUtcDate(isoStr);
+    if (!dt) return "Unknown";
+    const diffSec = Math.max(0, Math.floor((Date.now() - dt.getTime()) / 1000));
+    if (diffSec < 60) return `${diffSec}s ago`;
+    const diffMin = Math.floor(diffSec / 60);
+    if (diffMin < 60) return `${diffMin}m ago`;
+    const diffHr = Math.floor(diffMin / 60);
+    const remMin = diffMin % 60;
+    if (diffHr < 24) return `${diffHr}h ${remMin}m ago`;
+    const diffDays = Math.floor(diffHr / 24);
+    return `${diffDays}d ${diffHr % 24}h ago`;
+  };
+
+  const formatSessionDuration = (firstIso, lastIso) => {
+    const start = parseUtcDate(firstIso);
+    const end = parseUtcDate(lastIso);
+    if (!start || !end) return "—";
+    const diffSec = Math.max(0, Math.floor((end.getTime() - start.getTime()) / 1000));
+    if (diffSec < 60) return `${diffSec}s`;
+    const mins = Math.floor(diffSec / 60);
+    const secs = diffSec % 60;
+    if (mins < 60) return `${mins}m ${secs}s`;
+    const hrs = Math.floor(mins / 60);
+    return `${hrs}h ${mins % 60}m`;
+  };
+
+  const isLocallyAdministeredMac = (mac) => {
+    if (!mac) return false;
+    const firstHex = mac.split(/[:-]/)[0];
+    if (!firstHex) return false;
+    const byte0 = parseInt(firstHex, 16);
+    return !Number.isNaN(byte0) && Boolean(byte0 & 0b00000010);
+  };
 
   const loadDevices = async () => {
     try {
@@ -454,7 +528,7 @@ function App() {
     try {
       if (isCurrentlyOn) {
         appendTerminal(
-          `$ POST /simulation/clear — removing RFC 5737 (192.0.2.0/24) fictional devices to isolate real LAN...`,
+          `$ POST /simulation/clear — stopping Virtual Lab daemons & removing virtual hosts to isolate real LAN...`,
           "cmd"
         );
         const response = await fetch(`${API_URL}/simulation/clear`, {
@@ -462,42 +536,135 @@ function App() {
         });
         if (!response.ok) throw new Error(`Clear failed (${response.status})`);
         const data = await response.json();
-        appendTerminal(
-          `[SIMULATION: OFF] Removed ${data.removed_count} fictional device(s): ${(data.removed_devices || []).join(", ")}. Showing ONLY real physical LAN devices.`,
-          "success"
-        );
+        if (data.terminal_lines) {
+          appendTerminal(data.terminal_lines, "success");
+        } else {
+          appendTerminal(
+            `[VIRTUAL LAB: OFF] Removed ${data.removed_count} virtual device(s). Showing ONLY real physical LAN devices.`,
+            "success"
+          );
+        }
         setSimSeedBanner(null);
       } else {
         appendTerminal(
-          `$ POST /simulation/seed — seeding RFC 5737 TEST-NET-1 (192.0.2.0/24) simulation devices...`,
+          `$ POST /simulation/lab-up — booting 7 Virtual Enterprise Network Appliances on 127.0.2.0/24...`,
           "cmd"
         );
-        const response = await fetch(`${API_URL}/simulation/seed`, {
+        const response = await fetch(`${API_URL}/simulation/lab-up`, {
           method: "POST",
         });
-        if (!response.ok) throw new Error(`Seed failed (${response.status})`);
+        if (!response.ok) throw new Error(`Lab boot failed (${response.status})`);
         const data = await response.json();
         setSimSeedBanner(data);
-        appendTerminal(
-          `[SIMULATION: ON] Seeded ${data.created_count} new fictional device(s) (${data.already_present_count} already present) on 192.0.2.0/24.`,
-          "info"
-        );
-        setTimeout(() => setSimSeedBanner(null), 6000);
+        if (data.terminal_lines) {
+          appendTerminal(data.terminal_lines, "success");
+        }
+        setTimeout(() => setSimSeedBanner(null), 8000);
       }
       await loadDevices();
       await loadEvents();
     } catch (err) {
-      console.error("Simulation toggle error:", err);
-      appendTerminal(`[ERROR] Simulation toggle failed: ${err.message}`, "danger");
-      alert("Failed to toggle simulation mode: " + err.message);
+      console.error("Virtual Lab toggle error:", err);
+      appendTerminal(`[ERROR] Virtual Lab toggle failed: ${err.message}`, "danger");
     } finally {
       setSimSeedLoading(false);
+    }
+  };
+
+  const inspectDevice = async (device) => {
+    if (!device || !device.id) return;
+    setInspectingDeviceId(device.id);
+    setTerminalOpen(true);
+    appendTerminal(
+      `$ POST /discovery/inspect/${device.id} — running exhaustive L2/L3/L4/L7 probe on ${device.hostname || "host"} (${device.ip_address})...`,
+      "cmd"
+    );
+    try {
+      const response = await fetch(`${API_URL}/discovery/inspect/${device.id}`, {
+        method: "POST",
+      });
+      if (!response.ok) throw new Error(`Inspect failed (${response.status})`);
+      const data = await response.json();
+      setInspectedHostData(data);
+      if (data.terminal_lines) {
+        appendTerminal(
+          data.terminal_lines,
+          data.risk_findings && data.risk_findings.length > 0 ? "danger" : "success"
+        );
+      }
+      await loadDevices();
+    } catch (err) {
+      console.error("Inspect host error:", err);
+      appendTerminal(`[ERROR] Host inspection failed: ${err.message}`, "danger");
+    } finally {
+      setInspectingDeviceId(null);
+    }
+  };
+
+  const runConsoleCommand = async (rawCmd) => {
+    const cmd = (rawCmd ?? consoleInput).trim();
+    if (!cmd) return;
+    setTerminalOpen(true);
+    setConsoleInput("");
+    const lower = cmd.toLowerCase();
+    if (lower === "clear") {
+      setTerminalLines([
+        {
+          ts: new Date().toLocaleTimeString(),
+          text: "Console cleared. Ready for network commands...",
+          tone: "dim",
+        },
+      ]);
+      return;
+    }
+    if (lower === "scan") {
+      await discoverLiveLan();
+      return;
+    }
+    if (lower === "audit") {
+      await runSecurityAudit();
+      return;
+    }
+    if (lower === "patch-scan") {
+      await scanLanUpdates();
+      return;
+    }
+    if (lower === "lab") {
+      await toggleSimulationMode();
+      return;
+    }
+
+    setConsoleRunning(true);
+    appendTerminal(`$ ${cmd}`, "cmd");
+    try {
+      const response = await fetch(`${API_URL}/discovery/console`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command: cmd }),
+      });
+      if (!response.ok) throw new Error(`Console command failed (${response.status})`);
+      const data = await response.json();
+      if (data.lines) {
+        appendTerminal(data.lines, data.tone || "success");
+      }
+      if (data.inspection) {
+        setInspectedHostData(data.inspection);
+      }
+    } catch (err) {
+      appendTerminal(`[ERROR] ${err.message}`, "danger");
+    } finally {
+      setConsoleRunning(false);
     }
   };
 
   const scanLanUpdates = async () => {
     setLanScanLoading(true);
     setLanScanResult(null);
+    setTerminalOpen(true);
+    appendTerminal(
+      `$ POST /endpoint-updates/scan-lan — running agentless patch assessment across online LAN hosts...`,
+      "cmd"
+    );
     try {
       const response = await fetch(`${API_URL}/endpoint-updates/scan-lan`, {
         method: "POST",
@@ -509,11 +676,15 @@ function App() {
       }
       const data = await response.json();
       setLanScanResult(data);
+      appendTerminal(
+        `[PATCH-SCAN] Assessed ${data.machines_assessed} host(s) on ${data.network}: ${data.updates_available_count} need updates, ${data.up_to_date_count} up to date.`,
+        "success"
+      );
       await loadDevices();
       await loadEndpointUpdates();
     } catch (err) {
       console.error("LAN scan error:", err);
-      alert("Failed to complete LAN update scan: " + err.message);
+      appendTerminal(`[ERROR] Agentless LAN update scan failed: ${err.message}`, "danger");
     } finally {
       setLanScanLoading(false);
     }
@@ -869,11 +1040,45 @@ function App() {
         setAutomationResult(result);
       }
 
+      appendTerminal(
+        `[NAC:${action.toUpperCase()}] Device #${deviceId} (${result.ip_address || ""}) -> vlan=${result.vlan_id ?? value ?? "unchanged"} enforcement=${result.enforcement_status || "updated"}`,
+        "success"
+      );
+
       await loadDevices();
       await loadEvents();
     } catch (error) {
       console.error(`Device action ${action} failed:`, error);
-      alert(`Action failed: ${error.message || "Unknown error"}`);
+      appendTerminal(`[ERROR] Device action '${action}' failed: ${error.message}`, "danger");
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const deleteDeviceRecord = async (device) => {
+    if (!device || !device.id) return;
+    const confirmed = window.confirm(
+      `Remove historical connection record for ${device.hostname || device.ip_address || device.mac_address} (${device.mac_address}) from NETOPS history?`
+    );
+    if (!confirmed) return;
+
+    const actionKey = `delete-${device.id}`;
+    setActionLoading(actionKey);
+    try {
+      const response = await fetch(`${API_URL}/devices/${device.id}`, {
+        method: "DELETE",
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      appendTerminal(
+        `[HISTORY:PURGE] Removed historical device #${device.id} (${device.hostname || "Unknown"} • ${device.ip_address || "—"} • ${device.mac_address})`,
+        "info"
+      );
+      await loadDevices();
+    } catch (error) {
+      console.error("Failed to delete historical device:", error);
+      appendTerminal(`[ERROR] Failed to purge device #${device.id}: ${error.message}`, "danger");
     } finally {
       setActionLoading(null);
     }
@@ -918,16 +1123,33 @@ function App() {
   // ------------------------------------------------------------
 
   const renderDevicesPage = () => {
-    const filteredDevices = filterDevicesList(devices);
+    const filteredDevices = filterDevicesList(liveDevices);
 
     return (
       <div className="page">
         <div className="page-header">
           <div>
-            <div className="page-title">Connected Devices</div>
+            <div className="page-title">Live Connected Devices</div>
             <div className="page-description">
-              Devices detected on the LAN and their current classification, VLAN
-              segmentation, and Internet enforcement posture.
+              Only devices currently online on your router/LAN are shown here.
+              Previously connected offline devices are archived in{" "}
+              <button
+                type="button"
+                onClick={() => setActivePage("history")}
+                style={{
+                  background: "none",
+                  border: "none",
+                  padding: 0,
+                  color: "var(--text-primary)",
+                  textDecoration: "underline",
+                  cursor: "pointer",
+                  font: "inherit",
+                  fontWeight: 600,
+                }}
+              >
+                Connection History ({historicalDevices.length})
+              </button>
+              .
             </div>
           </div>
 
@@ -1080,7 +1302,7 @@ function App() {
                   </tr>
                 </thead>
                 <tbody>
-                  {devices
+                  {liveDevices
                     .filter((device) => device.approval_status === "rejected")
                     .map((device) => (
                       <tr key={device.id}>
@@ -1140,28 +1362,24 @@ function App() {
 
           <div className="filter-pill-bar">
             {[
-              { id: "all", label: `All Devices (${devices.length})` },
-              {
-                id: "online",
-                label: `Online (${devices.filter((d) => d.status === "online").length})`,
-              },
+              { id: "all", label: `All Live Online (${liveDevices.length})` },
               { id: "pending", label: `Pending (${pendingDevices})` },
               { id: "quarantined", label: `Quarantined (${quarantinedDevices})` },
               {
                 id: "needs_updates",
-                label: `Needs Updates (${devices.filter((d) => d.update_status === "updates_available").length})`,
+                label: `Needs Updates (${liveDevices.filter((d) => d.update_status === "updates_available").length})`,
               },
               {
                 id: "queued",
-                label: `Queued / Updating (${devices.filter((d) => Boolean(getActiveJobForDevice(d))).length})`,
+                label: `Queued / Updating (${liveDevices.filter((d) => Boolean(getActiveJobForDevice(d))).length})`,
               },
               {
                 id: "up_to_date",
-                label: `Up to Date (${devices.filter((d) => d.update_status === "up_to_date").length})`,
+                label: `Up to Date (${liveDevices.filter((d) => d.update_status === "up_to_date").length})`,
               },
               {
                 id: "unmonitored",
-                label: `No Agent (${devices.filter((d) => !d.update_status || d.update_status === "unmonitored").length})`,
+                label: `No Agent (${liveDevices.filter((d) => !d.update_status || d.update_status === "unmonitored").length})`,
               },
             ].map((pill) => (
               <button
@@ -1648,6 +1866,19 @@ function App() {
                           <button
                             type="button"
                             className="secondary-button small"
+                            disabled={inspectingDeviceId === device.id}
+                            onClick={() => inspectDevice(device)}
+                            title="Exhaustive Host Probe: Scans 26 TCP ports, grabs live service/HTTP/SSH banners, measures ICMP RTT & TTL OS fingerprint, reads kernel ARP state, and decodes IEEE 802 MAC bits."
+                          >
+                            <Icon name="search" size={12} />
+                            {inspectingDeviceId === device.id
+                              ? "Probing..."
+                              : "Inspect"}
+                          </button>
+
+                          <button
+                            type="button"
+                            className="secondary-button small"
                             onClick={() => {
                               const existingSchedule =
                                 accessSchedules[device.id]?.[0];
@@ -1749,10 +1980,10 @@ function App() {
   };
 
   const renderAccessPage = () => {
-    const allowed = devices.filter(
+    const allowed = liveDevices.filter(
       (device) => device.enforcement_status === "allowed"
     );
-    const quarantined = devices.filter(
+    const quarantined = liveDevices.filter(
       (device) => device.enforcement_status !== "allowed"
     );
 
@@ -1822,14 +2053,14 @@ function App() {
               </thead>
 
               <tbody>
-                {devices.length === 0 ? (
+                {liveDevices.length === 0 ? (
                   <tr>
                     <td colSpan="7">
-                      <div className="empty-state">No devices found.</div>
+                      <div className="empty-state">No live online devices found.</div>
                     </td>
                   </tr>
                 ) : (
-                  devices.map((device) => (
+                  liveDevices.map((device) => (
                     <tr key={device.id}>
                       <td>
                         <div className="device-primary">
@@ -1975,15 +2206,15 @@ function App() {
   const renderVLANPage = () => {
     const vlanDevices =
       vlanFilter === "all"
-        ? devices
-        : devices.filter(
+        ? liveDevices
+        : liveDevices.filter(
             (device) => String(device.vlan_id) === String(vlanFilter)
           );
 
-    const vlan20 = devices.filter((device) => Number(device.vlan_id) === 20);
-    const vlan30 = devices.filter((device) => Number(device.vlan_id) === 30);
-    const vlan40 = devices.filter((device) => Number(device.vlan_id) === 40);
-    const vlan90 = devices.filter(
+    const vlan20 = liveDevices.filter((device) => Number(device.vlan_id) === 20);
+    const vlan30 = liveDevices.filter((device) => Number(device.vlan_id) === 30);
+    const vlan40 = liveDevices.filter((device) => Number(device.vlan_id) === 40);
+    const vlan90 = liveDevices.filter(
       (device) => Number(device.vlan_id) === 90 || !device.vlan_id
     );
 
@@ -2123,15 +2354,30 @@ function App() {
                       </td>
 
                       <td className="mono">
-                        {device.switch_name || "Not identified"}
+                        {device.switch_name ||
+                          (networkInfo?.gateway_ip
+                            ? `GW-${networkInfo.gateway_ip}`
+                            : "LAN Gateway")}
                       </td>
 
                       <td className="mono">
-                        {device.switch_port || "Not identified"}
+                        {device.switch_port ||
+                          `${networkInfo?.interface || "wlp1s0"} (802.11 WLAN)`}
                       </td>
 
                       <td>
-                        <div style={{ display: "flex", gap: "6px" }}>
+                        <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                          <button
+                            type="button"
+                            className="secondary-button small"
+                            disabled={inspectingDeviceId === device.id}
+                            onClick={() => inspectDevice(device)}
+                            title="Run exhaustive 26-port TCP scan, banner grab, and L2/L3 telemetry inspection on this host"
+                          >
+                            {inspectingDeviceId === device.id
+                              ? "Probing..."
+                              : "Inspect"}
+                          </button>
                           <button
                             className="primary-button small"
                             disabled={
@@ -2237,6 +2483,19 @@ function App() {
               }}
             >
               <option value="all">All event types</option>
+              <option value="port_scan_detected">
+                IDS: Port Scan / Canary Triggered
+              </option>
+              <option value="arp_spoofing_detected">
+                IDS: ARP Spoofing / MITM Detected
+              </option>
+              <option value="gateway_mac_hijack">
+                IDS: Gateway MAC Hijack
+              </option>
+              <option value="risky_port_exposed">
+                IDS: Risky Port Exposed
+              </option>
+              <option value="new_device">Discovery: New Device Joined</option>
               <option value="endpoint_stale">Endpoint stale</option>
               <option value="endpoint_recovered">Endpoint recovered</option>
               <option value="device_detected">Device detected</option>
@@ -2840,36 +3099,47 @@ function App() {
           <div className="panel-header">
             <div>
               <div className="panel-title">
-                RFC 5737 Hardware-Free Simulation Mode
+                Virtual Enterprise Network Lab (127.0.2.0/24)
               </div>
               <div className="panel-subtitle">
-                Safe evaluation on TEST-NET-1 (192.0.2.0/24)
+                Spawns 7 live virtual appliances with real TCP sockets (ISP
+                Router, Cisco Switch, Sophos FW, Workstation, CCTV, Printer,
+                Rogue Pi)
               </div>
             </div>
             <button
               type="button"
-              className="primary-button small"
-              onClick={seedSimulationDevices}
+              className={
+                simulationDevicesCount > 0
+                  ? "approve-button small"
+                  : "primary-button small"
+              }
+              onClick={toggleSimulationMode}
               disabled={simSeedLoading}
             >
               <Icon name="beaker" size={13} />
-              {simSeedLoading ? "Seeding..." : "Seed Simulation Devices"}
+              {simSeedLoading
+                ? "Switching..."
+                : simulationDevicesCount > 0
+                  ? `Stop Virtual Lab (${simulationDevicesCount} Active)`
+                  : "Boot Virtual Network Lab"}
             </button>
           </div>
 
           <div className="settings-row">
-            <span>Simulated Subnet</span>
-            <code>192.0.2.0/24 (RFC 5737)</code>
+            <span>Virtual Lab Subnet</span>
+            <code>127.0.2.0/24 (Live Loopback Virtual NICs)</code>
           </div>
           <div className="settings-row">
-            <span>Active Simulated Endpoints</span>
-            <strong>{simulationDevicesCount} device(s)</strong>
+            <span>Active Virtual Appliances</span>
+            <strong>{simulationDevicesCount} virtual host(s)</strong>
           </div>
           <div className="settings-row">
-            <span>Hardware Safety Guard</span>
-            <span className="status-badge allowed">
-              Zero Physical Switch/Firewall Writes
-            </span>
+            <span>Physical LAN Interface</span>
+            <code>
+              {networkInfo?.interface || "wlp1s0"} • {networkInfo?.local_ip || "auto"} (GW{" "}
+              {networkInfo?.gateway_ip || "auto"})
+            </code>
           </div>
         </div>
 
@@ -2935,7 +3205,11 @@ function App() {
 
           <div className="settings-row">
             <span>Protected Infrastructure IPs</span>
-            <code>192.168.0.1, 192.168.0.10, 192.168.0.13, 192.168.0.101</code>
+            <code>
+              {networkInfo?.gateway_ip || "192.168.8.1"} (Gateway),{" "}
+              {networkInfo?.local_ip || "192.168.8.30"} (NETOPS Sensor),
+              127.0.2.10:4444 (Virtual Sophos XGS)
+            </code>
           </div>
         </div>
       </div>
@@ -3203,16 +3477,16 @@ function App() {
       0
     );
 
-    const computerDevices = devices.filter(
+    const computerDevices = liveDevices.filter(
       (device) => device.device_type === "computer"
     ).length;
-    const cctvDevices = devices.filter(
+    const cctvDevices = liveDevices.filter(
       (device) => device.device_type === "cctv"
     ).length;
-    const printerDevices = devices.filter(
+    const printerDevices = liveDevices.filter(
       (device) => device.device_type === "printer"
     ).length;
-    const unknownDevices = devices.filter(
+    const unknownDevices = liveDevices.filter(
       (device) => !device.device_type || device.device_type === "unknown"
     ).length;
 
@@ -3667,14 +3941,14 @@ function App() {
               </thead>
 
               <tbody>
-                {devices.length === 0 ? (
+                {liveDevices.length === 0 ? (
                   <tr>
                     <td colSpan="6">
-                      <div className="empty-state">No devices detected.</div>
+                      <div className="empty-state">No live online devices detected.</div>
                     </td>
                   </tr>
                 ) : (
-                  devices.slice(0, 10).map((device) => (
+                  liveDevices.slice(0, 10).map((device) => (
                     <tr key={device.id}>
                       <td>
                         <div className="device-primary">
@@ -3737,10 +4011,351 @@ function App() {
     );
   };
 
+  const renderHistoryPage = () => {
+    const sortedAll = [...devices].sort((a, b) => {
+      const ta = parseUtcDate(a.last_seen)?.getTime() || 0;
+      const tb = parseUtcDate(b.last_seen)?.getTime() || 0;
+      return tb - ta;
+    });
+
+    const filteredHistory = sortedAll.filter((device) => {
+      if (historyFilter === "disconnected") return device.status !== "online";
+      if (historyFilter === "randomized")
+        return isLocallyAdministeredMac(device.mac_address);
+      if (historyFilter === "rejected")
+        return device.approval_status === "rejected";
+      return true;
+    });
+
+    const randomizedCount = devices.filter((d) =>
+      isLocallyAdministeredMac(d.mac_address)
+    ).length;
+
+    return (
+      <div className="page">
+        <div className="page-header">
+          <div>
+            <div className="page-title">Device Connection History</div>
+            <div className="page-description">
+              Audit log of devices that previously connected to your router/LAN,
+              showing exact connection timestamps, session duration, and MAC
+              privacy posture.
+            </div>
+          </div>
+
+          <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+            <button
+              className="primary-button"
+              type="button"
+              onClick={discoverLiveLan}
+              disabled={liveDiscoveryLoading}
+            >
+              <Icon name="refresh" size={14} />
+              {liveDiscoveryLoading
+                ? "Verifying Live LAN..."
+                : "Re-Scan LAN Reachability"}
+            </button>
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={loadDevices}
+            >
+              <Icon name="clock" size={14} />
+              Refresh History
+            </button>
+          </div>
+        </div>
+
+        <div className="report-grid">
+          <ReportCard
+            title="Disconnected (Past)"
+            value={historicalDevices.length}
+            description="Devices that were connected earlier and are now offline."
+            onClick={() => setHistoryFilter("disconnected")}
+          />
+          <ReportCard
+            title="Currently Online"
+            value={liveDevices.length}
+            description="Active sessions currently reachable on the LAN."
+            onClick={() => setActivePage("devices")}
+          />
+          <ReportCard
+            title="Randomized MACs"
+            value={randomizedCount}
+            description="Devices using IEEE Locally Administered (U/L=1) privacy MACs."
+            onClick={() => setHistoryFilter("randomized")}
+          />
+          <ReportCard
+            title="Total Seen MACs"
+            value={devices.length}
+            description="All unique MAC addresses ever recorded by NETOPS."
+            onClick={() => setHistoryFilter("all")}
+          />
+        </div>
+
+        <div className="panel">
+          <div className="panel-header">
+            <div>
+              <div className="panel-title">
+                Historical Router &amp; LAN Connection Sessions
+              </div>
+              <div className="panel-subtitle">
+                Every device discovered on your subnet is timestamped with First
+                Connected and Last Seen Active times.
+              </div>
+            </div>
+
+            <div className="settings-status">
+              <span className="status-dot offline" />
+              Showing {filteredHistory.length} Record(s)
+            </div>
+          </div>
+
+          <div className="filter-pill-bar">
+            {[
+              {
+                id: "disconnected",
+                label: `Disconnected Only (${historicalDevices.length})`,
+              },
+              {
+                id: "all",
+                label: `All Connection Records (${devices.length})`,
+              },
+              {
+                id: "randomized",
+                label: `Randomized / Privacy MACs (${randomizedCount})`,
+              },
+              {
+                id: "rejected",
+                label: `Rejected / Blocked (${devices.filter((d) => d.approval_status === "rejected").length})`,
+              },
+            ].map((pill) => (
+              <button
+                key={pill.id}
+                type="button"
+                className={`filter-pill ${historyFilter === pill.id ? "active" : ""}`}
+                onClick={() => setHistoryFilter(pill.id)}
+              >
+                {pill.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="table-container">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>DEVICE &amp; MAC</th>
+                  <th>CONNECTION STATE</th>
+                  <th>FIRST CONNECTED</th>
+                  <th>LAST SEEN ACTIVE</th>
+                  <th>SESSION WINDOW</th>
+                  <th>NAC POSTURE</th>
+                  <th>ACTIONS</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredHistory.length === 0 ? (
+                  <tr>
+                    <td colSpan="7">
+                      <div className="empty-state">
+                        No historical device records match this filter.
+                      </div>
+                    </td>
+                  </tr>
+                ) : (
+                  filteredHistory.map((device) => {
+                    const isOnline = device.status === "online";
+                    const isRandomMac = isLocallyAdministeredMac(
+                      device.mac_address
+                    );
+                    return (
+                      <tr key={device.id}>
+                        <td>
+                          <div className="device-primary">
+                            <span
+                              className={`device-icon ${
+                                device.device_type === "cctv"
+                                  ? "camera"
+                                  : device.device_type || "unknown"
+                              }`}
+                            >
+                              <DeviceTypeIcon
+                                type={device.device_type}
+                                size={14}
+                              />
+                            </span>
+                            <span>{device.hostname || "Unknown Device"}</span>
+                            {isRandomMac && (
+                              <span
+                                className="status-badge warning"
+                                style={{ fontSize: "10px", padding: "1px 6px" }}
+                                title="IEEE 802 Locally Administered Bit (U/L=1) is set — smartphone/OS Wi-Fi MAC randomization active"
+                              >
+                                Randomized MAC
+                              </span>
+                            )}
+                          </div>
+                          <div className="device-secondary">
+                            Last IP: {device.ip_address || "—"} • MAC:{" "}
+                            {device.mac_address}
+                          </div>
+                          {device.vendor && (
+                            <div className="device-secondary">
+                              Vendor: {device.vendor}
+                            </div>
+                          )}
+                        </td>
+
+                        <td>
+                          {isOnline ? (
+                            <div>
+                              <span className="status-badge allowed">
+                                ONLINE NOW
+                              </span>
+                              <div className="device-secondary">
+                                Active on {device.switch_port || "LAN"}
+                              </div>
+                            </div>
+                          ) : (
+                            <div>
+                              <span className="status-badge blocked">
+                                OFFLINE (DISCONNECTED)
+                              </span>
+                              <div className="device-secondary">
+                                Left {formatRelativeTime(device.last_seen)}
+                              </div>
+                            </div>
+                          )}
+                        </td>
+
+                        <td className="mono" style={{ fontSize: "12px" }}>
+                          <div>{formatTimestamp(device.first_seen)}</div>
+                          <div className="device-secondary">
+                            {formatRelativeTime(device.first_seen)}
+                          </div>
+                        </td>
+
+                        <td className="mono" style={{ fontSize: "12px" }}>
+                          <div>{formatTimestamp(device.last_seen)}</div>
+                          <div className="device-secondary">
+                            {isOnline
+                              ? "Currently active"
+                              : `Last seen ${formatRelativeTime(device.last_seen)}`}
+                          </div>
+                        </td>
+
+                        <td className="mono" style={{ fontSize: "12px" }}>
+                          <strong>
+                            {formatSessionDuration(
+                              device.first_seen,
+                              device.last_seen
+                            )}
+                          </strong>
+                          <div className="device-secondary">
+                            VLAN {device.vlan_id || 90}
+                          </div>
+                        </td>
+
+                        <td>
+                          <div
+                            style={{
+                              display: "flex",
+                              gap: "6px",
+                              flexWrap: "wrap",
+                              alignItems: "center",
+                            }}
+                          >
+                            <StatusBadge value={device.approval_status} />
+                            <EnforcementBadge
+                              value={device.enforcement_status}
+                            />
+                          </div>
+                        </td>
+
+                        <td>
+                          <div
+                            style={{
+                              display: "flex",
+                              gap: "6px",
+                              flexWrap: "wrap",
+                            }}
+                          >
+                            <button
+                              type="button"
+                              className="secondary-button small"
+                              disabled={inspectingDeviceId === device.id}
+                              onClick={() => inspectDevice(device)}
+                              title="Probe IP & MAC to verify if device is offline or inspect its IEEE 802 MAC bits"
+                            >
+                              <Icon name="search" size={12} />
+                              {inspectingDeviceId === device.id
+                                ? "Probing..."
+                                : "Inspect"}
+                            </button>
+
+                            {device.approval_status !== "rejected" && (
+                              <button
+                                type="button"
+                                className="reject-button small"
+                                disabled={
+                                  actionLoading === `reject-${device.id}`
+                                }
+                                onClick={() =>
+                                  deviceAction(device.id, "reject")
+                                }
+                                title="Pre-block this MAC so it is immediately quarantined if it ever reconnects"
+                              >
+                                Block MAC
+                              </button>
+                            )}
+
+                            {device.approval_status !== "approved" && (
+                              <button
+                                type="button"
+                                className="approve-button small"
+                                disabled={
+                                  actionLoading === `approve-${device.id}`
+                                }
+                                onClick={() =>
+                                  deviceAction(device.id, "approve")
+                                }
+                              >
+                                Approve
+                              </button>
+                            )}
+
+                            <button
+                              type="button"
+                              className="secondary-button small"
+                              disabled={actionLoading === `delete-${device.id}`}
+                              onClick={() => deleteDeviceRecord(device)}
+                              title="Permanently remove this historical device record from NETOPS"
+                            >
+                              {actionLoading === `delete-${device.id}`
+                                ? "..."
+                                : "Forget"}
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const renderPage = () => {
     switch (activePage) {
       case "devices":
         return renderDevicesPage();
+      case "history":
+        return renderHistoryPage();
       case "events":
         return renderEventsPage();
       case "access":
@@ -4393,12 +5008,23 @@ function App() {
 
           <NavItem
             icon={<Icon name="devices" size={16} />}
-            label="Devices"
+            label="Live Devices"
             badge={totalDevices}
             active={activePage === "devices"}
             onClick={() => {
               setDeviceFilter("all");
               setActivePage("devices");
+            }}
+          />
+
+          <NavItem
+            icon={<Icon name="clock" size={16} />}
+            label="Connection History"
+            badge={historicalDevices.length > 0 ? historicalDevices.length : null}
+            active={activePage === "history"}
+            onClick={() => {
+              setHistoryFilter("disconnected");
+              setActivePage("history");
             }}
           />
 
@@ -4520,23 +5146,23 @@ function App() {
               disabled={simSeedLoading}
               title={
                 simulationDevicesCount > 0
-                  ? "Simulation is ON. Click to turn OFF and remove fictional 192.0.2.x devices so only real LAN devices remain."
-                  : "Simulation is OFF (Live LAN Only). Click to seed fictional RFC 5737 test devices."
+                  ? "Virtual Enterprise Lab is ON (7 live TCP appliance daemons on 127.0.2.0/24). Click to shut down virtual appliances and view ONLY your real physical LAN."
+                  : "Virtual Enterprise Lab is OFF (Live LAN Only). Click to boot 7 virtual appliances (ISP Router, Cisco Catalyst Switch, Sophos XGS Firewall, Workstation, Hikvision CCTV, HP LaserJet Printer, Rogue Pi) with real listening TCP ports."
               }
             >
               <Icon name="beaker" size={13} />
               {simSeedLoading
                 ? "Switching..."
                 : simulationDevicesCount > 0
-                  ? `Simulation: ON (${simulationDevicesCount})`
-                  : "Simulation: OFF (Live LAN)"}
+                  ? `Virtual Lab: ON (${simulationDevicesCount} VMs)`
+                  : "Virtual Lab: OFF (Live LAN)"}
             </button>
 
             <button
               type="button"
               className="secondary-button small"
               onClick={() => setTerminalOpen((prev) => !prev)}
-              title="Toggle Sysadmin Network Execution Terminal"
+              title="Toggle Interactive Sysadmin Network Execution Console"
             >
               <span className="mono" style={{ fontWeight: 700 }}>
                 &gt;_
@@ -4735,6 +5361,8 @@ function App() {
                 letterSpacing: "0.06em",
                 textTransform: "uppercase",
                 color: "var(--text-secondary)",
+                flexWrap: "wrap",
+                gap: "8px",
               }}
             >
               <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
@@ -4759,6 +5387,7 @@ function App() {
                       },
                     ])
                   }
+                  title="Clear console output buffer"
                 >
                   Clear
                 </button>
@@ -4767,14 +5396,111 @@ function App() {
                   className="secondary-button small"
                   style={{ minHeight: "24px", padding: "0 8px", fontSize: "10px" }}
                   onClick={() => setTerminalOpen(false)}
+                  title="Minimize the Sysadmin Console panel"
                 >
                   Minimize
                 </button>
               </div>
             </div>
+
             <div
               style={{
-                maxHeight: "210px",
+                display: "flex",
+                alignItems: "center",
+                gap: "6px",
+                flexWrap: "wrap",
+                padding: "7px 14px",
+                background: "#050505",
+                borderBottom: "1px solid var(--border-subtle)",
+              }}
+            >
+              <span
+                style={{
+                  fontSize: "10px",
+                  color: "var(--text-dim)",
+                  letterSpacing: "0.06em",
+                  textTransform: "uppercase",
+                  marginRight: "4px",
+                }}
+              >
+                Click Command (Hover for info):
+              </span>
+              {[
+                {
+                  cmd: "arp",
+                  label: "arp",
+                  tip: "Layer-2 ARP Cache (`ip -4 neigh show`): Lists every IP-to-MAC mapping on your router subnet, kernel reachability state (REACHABLE/STALE), and IEEE OUI hardware manufacturer.",
+                },
+                {
+                  cmd: "route",
+                  label: "route",
+                  tip: "Layer-3 Routing Table (`ip -4 route` & `ip -br -4 addr`): Shows your active network interface (wlp1s0), local CIDR subnet, and Default Gateway path.",
+                },
+                {
+                  cmd: "ports",
+                  label: "ports",
+                  tip: "Local Listening Sockets (`ss -tuln`): Lists active TCP/UDP services bound on this sensor host, including the NETOPS Canary Trap (:8899).",
+                },
+                {
+                  cmd: "ping gw",
+                  label: "ping gw",
+                  tip: "Ping Default Gateway (`ping -c 2`): Sends live ICMP Echo Requests to your router, measures Round-Trip Time (RTT ms), and fingerprints the OS via IP TTL.",
+                },
+                {
+                  cmd: "inspect gw",
+                  label: "inspect gw",
+                  tip: "Deep-Inspect Gateway: Probes 26 TCP ports, grabs live HTTP/SSH banners, checks kernel ARP state, and decodes IEEE 802 MAC bits on your router.",
+                },
+                {
+                  cmd: "scan",
+                  label: "scan",
+                  tip: "Sweep Active LAN Subnet (`POST /discovery/scan`): Runs mDNS/TCP/ARP discovery across your current Wi-Fi/LAN subnet to detect connected devices.",
+                },
+                {
+                  cmd: "audit",
+                  label: "audit",
+                  tip: "4-Layer LAN IDS Audit (`POST /discovery/security-audit`): Checks for ARP spoofing (MITM), gateway MAC hijack, risky open ports (:21/:23/:445/:3389), and Canary hits.",
+                },
+                {
+                  cmd: "patch-scan",
+                  label: "patch-scan",
+                  tip: "Agentless LAN Patch Scan (`POST /endpoint-updates/scan-lan`): Queries local package managers and probes LAN endpoints for pending OS security updates.",
+                },
+                {
+                  cmd: "lab",
+                  label: "lab",
+                  tip: "Toggle Virtual Enterprise Network Lab (`127.0.2.0/24`): Boots or stops 7 live virtual appliances (ISP Router, Cisco Switch, Sophos FW, Workstation, CCTV, Printer, Rogue Pi).",
+                },
+                {
+                  cmd: "help",
+                  label: "help",
+                  tip: "Show all interactive Sysadmin Console commands and syntax examples.",
+                },
+              ].map((item) => (
+                <button
+                  key={item.cmd}
+                  type="button"
+                  className="secondary-button small"
+                  disabled={consoleRunning}
+                  onClick={() => runConsoleCommand(item.cmd)}
+                  title={item.tip}
+                  style={{
+                    minHeight: "23px",
+                    padding: "0 8px",
+                    fontSize: "11px",
+                    fontFamily: "var(--font-mono)",
+                    background: "#0d0d0f",
+                    borderColor: "#27272a",
+                  }}
+                >
+                  $ {item.label}
+                </button>
+              ))}
+            </div>
+
+            <div
+              style={{
+                maxHeight: "220px",
                 overflowY: "auto",
                 padding: "12px 14px",
                 fontSize: "12px",
@@ -4801,9 +5527,204 @@ function App() {
                 );
               })}
             </div>
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                runConsoleCommand(consoleInput);
+              }}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+                padding: "8px 14px",
+                background: "#070708",
+                borderTop: "1px solid var(--border-subtle)",
+              }}
+            >
+              <span
+                style={{
+                  color: "#4ade80",
+                  fontSize: "12px",
+                  fontWeight: 700,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                netops@{networkInfo?.interface || "lan"}:~$
+              </span>
+              <input
+                type="text"
+                value={consoleInput}
+                onChange={(e) => setConsoleInput(e.target.value)}
+                placeholder="Type a command (e.g., arp, route, ports, ping gw, inspect 192.168.8.1, scan, audit, lab, help)..."
+                style={{
+                  flex: 1,
+                  background: "transparent",
+                  border: "none",
+                  color: "#fafafa",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: "12px",
+                  outline: "none",
+                  padding: "2px 4px",
+                }}
+              />
+              <button
+                type="submit"
+                className="primary-button small"
+                disabled={consoleRunning || !consoleInput.trim()}
+                style={{ minHeight: "26px", padding: "0 10px", fontSize: "11px" }}
+              >
+                {consoleRunning ? "Running..." : "Execute"}
+              </button>
+            </form>
           </section>
         )}
       </main>
+
+      {inspectedHostData && (
+        <div
+          className="modal-overlay"
+          onClick={() => setInspectedHostData(null)}
+        >
+          <div
+            className="automation-modal"
+            onClick={(e) => e.stopPropagation()}
+            style={{ inlineSize: "min(820px, 95%)", maxBlockSize: "88vh", overflowY: "auto" }}
+          >
+            <div className="automation-modal-header">
+              <div>
+                <div className="automation-label">
+                  DEEP L2 / L3 / L4 / L7 HOST TELEMETRY
+                </div>
+                <div className="automation-title">
+                  {inspectedHostData.hostname || "Host"} ({inspectedHostData.ip_address})
+                </div>
+              </div>
+              <button
+                type="button"
+                className="secondary-button small"
+                onClick={() => setInspectedHostData(null)}
+              >
+                ✕
+              </button>
+            </div>
+
+            <div style={{ marginTop: "16px", display: "grid", gap: "14px" }}>
+              <div className="panel" style={{ padding: "14px" }}>
+                <div className="panel-title" style={{ marginBottom: "8px", fontSize: "12px" }}>
+                  Layer-2 Data Link &amp; IEEE 802 MAC Address Breakdown
+                </div>
+                <div className="settings-row">
+                  <span>Hardware MAC Address</span>
+                  <code>{inspectedHostData.mac_analysis?.mac_address}</code>
+                </div>
+                <div className="settings-row">
+                  <span>IEEE OUI Vendor (Bytes 0..2)</span>
+                  <strong>
+                    {inspectedHostData.mac_analysis?.oui_prefix} →{" "}
+                    {inspectedHostData.mac_analysis?.vendor}
+                  </strong>
+                </div>
+                <div className="settings-row">
+                  <span>NIC Controller Serial (Bytes 3..5)</span>
+                  <code>{inspectedHostData.mac_analysis?.nic_serial}</code>
+                </div>
+                <div className="settings-row">
+                  <span>First Octet Binary &amp; U/L Bit</span>
+                  <code>
+                    {inspectedHostData.mac_analysis?.first_octet_hex} (
+                    {inspectedHostData.mac_analysis?.first_octet_binary}) •{" "}
+                    {inspectedHostData.mac_analysis?.ul_bit}
+                  </code>
+                </div>
+                <div className="settings-row">
+                  <span>Linux Kernel ARP Neighbor State</span>
+                  <span className="status-badge allowed">
+                    {inspectedHostData.layer3?.arp_state}
+                  </span>
+                </div>
+              </div>
+
+              <div className="panel" style={{ padding: "14px" }}>
+                <div className="panel-title" style={{ marginBottom: "8px", fontSize: "12px" }}>
+                  Layer-3 Network &amp; ICMP TTL OS Fingerprint
+                </div>
+                <div className="settings-row">
+                  <span>IPv4 Address &amp; Reverse DNS</span>
+                  <code>
+                    {inspectedHostData.ip_address}{" "}
+                    {inspectedHostData.reverse_dns
+                      ? `(${inspectedHostData.reverse_dns})`
+                      : ""}
+                  </code>
+                </div>
+                <div className="settings-row">
+                  <span>Round-Trip Time (RTT Latency)</span>
+                  <strong>
+                    {inspectedHostData.latency_ms !== null &&
+                    inspectedHostData.latency_ms !== undefined
+                      ? `${inspectedHostData.latency_ms} ms`
+                      : "Filtered / Timeout"}
+                  </strong>
+                </div>
+                <div className="settings-row">
+                  <span>Observed IP TTL &amp; Stack Fingerprint</span>
+                  <code>{inspectedHostData.layer3?.os_fingerprint}</code>
+                </div>
+              </div>
+
+              <div className="panel" style={{ padding: "14px" }}>
+                <div className="panel-title" style={{ marginBottom: "8px", fontSize: "12px" }}>
+                  Layer-4 / Layer-7 Open TCP Ports &amp; Service Banners ({inspectedHostData.open_ports?.length || 0} Open of 26 Probed)
+                </div>
+                {!inspectedHostData.open_ports ||
+                inspectedHostData.open_ports.length === 0 ? (
+                  <div className="empty-state" style={{ padding: "16px" }}>
+                    Zero open TCP ports detected across 26 standard enterprise ports.
+                  </div>
+                ) : (
+                  <div className="table-container">
+                    <table className="data-table">
+                      <thead>
+                        <tr>
+                          <th>TCP PORT</th>
+                          <th>SERVICE</th>
+                          <th>LIVE BANNER / HEADER</th>
+                          <th>POSTURE</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {inspectedHostData.open_ports.map((p) => (
+                          <tr key={p.port}>
+                            <td className="mono">:{p.port}</td>
+                            <td>
+                              <strong>{p.service}</strong>
+                            </td>
+                            <td className="mono" style={{ fontSize: "11.5px" }}>
+                              {p.banner || "TCP SYN-ACK (No greeting banner)"}
+                            </td>
+                            <td>
+                              {p.risk ? (
+                                <span className="status-badge blocked">
+                                  RISK: {p.risk}
+                                </span>
+                              ) : (
+                                <span className="status-badge allowed">
+                                  Standard Service
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {newDeviceAlert && (
         <div className="new-device-alert">
@@ -4902,7 +5823,8 @@ function NavItem({ icon, label, badge, badgeTone, active, onClick }) {
 function getPageTitle(page) {
   const titles = {
     dashboard: "Network Operations Dashboard",
-    devices: "Device Management & NAC",
+    devices: "Live Connected Devices & NAC",
+    history: "Device Connection History",
     events: "Security & Network Audit Log",
     access: "Access Control & Quarantine",
     "endpoint-updates": "Endpoint Patch Management",
@@ -5083,7 +6005,11 @@ function EventRow({ event }) {
   if (
     type.includes("reject") ||
     type.includes("quarantine") ||
-    type.includes("unrecognized")
+    type.includes("unrecognized") ||
+    type.includes("spoof") ||
+    type.includes("hijack") ||
+    type.includes("port_scan") ||
+    type.includes("risky_port")
   ) {
     dotClass += " warning";
   } else if (type.includes("approve") || type.includes("allow")) {

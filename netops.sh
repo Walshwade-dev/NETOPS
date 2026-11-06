@@ -26,16 +26,35 @@ case "$ACTION" in
 
         # 1. Start FastAPI Backend on port 8000
         echo "  [1/3] Starting FastAPI Backend on http://localhost:8000 ..."
-        PYTHONPATH="$PROJECT_DIR" nohup "$PROJECT_DIR/.venv/bin/uvicorn" backend.app.main:app \
-            --host 0.0.0.0 --port 8000 < /dev/null > "$BACKEND_LOG" 2>&1 &
-        BACKEND_PID=$!
+        if command -v systemd-run >/dev/null 2>&1; then
+            systemctl --user stop netops-demo-backend.service >/dev/null 2>&1 || true
+            systemctl --user reset-failed netops-demo-backend.service >/dev/null 2>&1 || true
+            systemd-run --user --unit=netops-demo-backend --collect \
+                --working-directory="$PROJECT_DIR" \
+                --setenv="PYTHONPATH=$PROJECT_DIR" \
+                "$PROJECT_DIR/.venv/bin/uvicorn" backend.app.main:app \
+                --host 0.0.0.0 --port 8000 >/dev/null 2>&1
+        else
+            PYTHONPATH="$PROJECT_DIR" nohup "$PROJECT_DIR/.venv/bin/uvicorn" backend.app.main:app \
+                --host 0.0.0.0 --port 8000 < /dev/null > "$BACKEND_LOG" 2>&1 &
+        fi
+        sleep 0.3
+        BACKEND_PID=$(pgrep -f "uvicorn backend.app.main:app" | head -n 1 || echo "")
 
         # 2. Start React 19 + Vite Frontend on port 5173
         echo "  [2/3] Starting React 19 Vite Console on http://localhost:5173 ..."
-        (
-            cd "$PROJECT_DIR/frontend"
-            nohup npm run dev -- --host 0.0.0.0 --port 5173 < /dev/null > "$FRONTEND_LOG" 2>&1 &
-        ) < /dev/null > /dev/null 2>&1
+        if command -v systemd-run >/dev/null 2>&1; then
+            systemctl --user stop netops-demo-frontend.service >/dev/null 2>&1 || true
+            systemctl --user reset-failed netops-demo-frontend.service >/dev/null 2>&1 || true
+            systemd-run --user --unit=netops-demo-frontend --collect \
+                --working-directory="$PROJECT_DIR/frontend" \
+                npm run dev -- --host 0.0.0.0 --port 5173 >/dev/null 2>&1
+        else
+            (
+                cd "$PROJECT_DIR/frontend"
+                nohup npm run dev -- --host 0.0.0.0 --port 5173 < /dev/null > "$FRONTEND_LOG" 2>&1 &
+            ) < /dev/null > /dev/null 2>&1
+        fi
         sleep 0.3
         FRONTEND_PID=$(pgrep -f "vite.*5173" | head -n 1 || echo "")
 
@@ -52,9 +71,8 @@ case "$ACTION" in
             sleep 0.4
         done
 
-        # 3. Seed Simulation Devices
-        echo "  [3/3] Seeding fictional LAN devices (Zero hardware required)..."
-        seed_simulation
+        # 3. Clear any leftover simulation devices so Live LAN Mode is clean by default
+        curl -s -X POST http://localhost:8000/simulation/clear >/dev/null 2>&1 || true
 
         echo ""
         echo "=================================================================="
@@ -66,6 +84,7 @@ case "$ACTION" in
         ;;
     demo-stop)
         echo "🛑 Stopping NETOPS standalone demo processes..."
+        systemctl --user stop netops-demo-backend.service netops-demo-frontend.service >/dev/null 2>&1 || true
         if [ -f "$PID_FILE" ]; then
             read -r BACKEND_PID FRONTEND_PID < "$PID_FILE" || true
             kill "$BACKEND_PID" "$FRONTEND_PID" 2>/dev/null || true

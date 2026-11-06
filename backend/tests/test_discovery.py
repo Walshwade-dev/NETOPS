@@ -140,3 +140,21 @@ def test_lan_ids_detects_arp_spoofing_duplicate_mac():
         assert "192.168.8.1" in audit["alerts"][0]["ip_addresses"]
 
 
+def test_analyze_mac_bits_and_sysadmin_console_commands():
+    from backend.app.services.lan_intelligence import (
+        analyze_mac_bits,
+        execute_sysadmin_command,
+    )
+
+    info = analyze_mac_bits("4C:D5:77:57:C3:13")
+    assert info["oui_prefix"] == "4C:D5:77"
+    assert info["nic_serial"] == "57:C3:13"
+    assert info["first_octet_binary"] == "01001100"
+    assert info["is_randomized_laa"] is False
+
+    help_res = execute_sysadmin_command("help")
+    assert help_res["tone"] == "info"
+    assert any("inspect" in line for line in help_res["lines"])
+
+
+

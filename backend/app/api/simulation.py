@@ -6,6 +6,14 @@ from ..database import get_db
 from ..models.device import Device
 from ..services.device_classifier import classify_device
 from ..services.event_service import create_event
+from ..services.virtual_lab import (
+    VIRTUAL_APPLIANCES,
+    VIRTUAL_LAB_TAG,
+    is_virtual_lab_running,
+    seed_virtual_lab_devices,
+    start_virtual_lab_daemons,
+    stop_virtual_lab_daemons,
+)
 from ..services.vlan_policy import get_vlan_for_device_type
 
 router = APIRouter(prefix="/simulation", tags=["Simulation"])
@@ -148,21 +156,49 @@ def seed_simulation_devices(db: Session = Depends(get_db)):
     }
 
 
+@router.post("/lab-up")
+async def start_virtual_network_lab(db: Session = Depends(get_db)):
+    """
+    Boot the NETOPS Virtual Enterprise Network Lab on 127.0.2.0/24:
+    Starts live TCP listeners for ISP Router, Cisco Catalyst Switch, Sophos XGS
+    Firewall, Dell Workstation, Hikvision CCTV, HP LaserJet Printer, and Rogue
+    Raspberry Pi DropBox, and registers them in the topology.
+    """
+    daemon_logs = await start_virtual_lab_daemons()
+    seeded = seed_virtual_lab_devices(db)
+    terminal_lines = [
+        "$ netops-lab --up --subnet 127.0.2.0/24 --topology enterprise-nac",
+        "[LAB] Booting 7 virtual network appliances with live TCP socket listeners...",
+        *daemon_logs,
+        f"[LAB] Virtual Enterprise Network Lab is ONLINE ({len(VIRTUAL_APPLIANCES)} virtual hosts reachable via ICMP & TCP).",
+    ]
+    return {
+        "mode": "virtual_lab",
+        "virtual_lab_active": is_virtual_lab_running(),
+        "created_count": len(seeded["created"]),
+        "already_present_count": len(seeded["already_present"]),
+        "terminal_lines": terminal_lines,
+    }
+
+
 @router.post("/clear")
-def clear_simulation_devices(db: Session = Depends(get_db)):
+async def clear_simulation_devices(db: Session = Depends(get_db)):
     """
-    Remove fictional RFC 5737 simulation devices so the operator can view
-    strictly real physical LAN telemetry without simulation noise.
+    Stop virtual appliance listeners and remove virtual/simulation devices so
+    the operator views strictly real physical LAN telemetry without noise.
     """
-    sim_macs = {sample["mac_address"] for sample in SAMPLE_DEVICES}
+    stopped_listeners = await stop_virtual_lab_daemons()
+    sim_macs = {sample["mac_address"] for sample in SAMPLE_DEVICES} | {
+        spec["mac_address"] for spec in VIRTUAL_APPLIANCES
+    }
     devices = db.scalars(select(Device)).all()
     removed_hostnames: list[str] = []
 
     for device in devices:
         is_sim = (
             device.mac_address in sim_macs
-            or (device.notes and "NETOPS SIMULATION:" in device.notes)
-            or (device.ip_address and device.ip_address.startswith("192.0.2."))
+            or (device.notes and ("NETOPS SIMULATION:" in device.notes or VIRTUAL_LAB_TAG in device.notes))
+            or (device.ip_address and (device.ip_address.startswith("192.0.2.") or device.ip_address.startswith("127.0.2.")))
         )
         if is_sim:
             removed_hostnames.append(f"{device.hostname or device.mac_address} ({device.ip_address})")
@@ -172,7 +208,14 @@ def clear_simulation_devices(db: Session = Depends(get_db)):
 
     return {
         "mode": "live_lan_only",
+        "stopped_listeners": stopped_listeners,
         "removed_count": len(removed_hostnames),
         "removed_devices": removed_hostnames,
+        "terminal_lines": [
+            "$ netops-lab --down --isolate-live-lan",
+            f"[LAB] Stopped {stopped_listeners} virtual appliance TCP socket listener(s) on 127.0.2.0/24.",
+            f"[CLEAN] Removed {len(removed_hostnames)} virtual/simulation host(s): {', '.join(removed_hostnames) or 'none'}",
+            "[OK] Switched to strictly LIVE PHYSICAL LAN telemetry mode.",
+        ],
     }
 
